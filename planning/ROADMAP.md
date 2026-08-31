@@ -1,99 +1,119 @@
 # ROADMAP.md
 
 ## Назначение
-Этот файл используется как трекер прогресса по проекту. Здесь зафиксированы этапы, порядок работ и ожидаемый результат по каждому этапу.
 
-## Этап 1. Основа проекта
-**Цель:** подготовить минимальный каркас проекта, чтобы дальше наращивать функциональность без хаоса.
+Этот roadmap декомпозирует MVP из `PRODUCT.md` и детализирует его по `mvp_false_breakout_btcusdt.md`.
 
-### Что должно быть сделано
-- определить структуру репозитория
-- зафиксировать правила работы агента в `AGENTS.md`
-- описать продукт в `planning/PRODUCT.md`
-- описать архитектуру в `planning/ARCHITECTURE.md`
-- создать roadmap для трекинга прогресса
+## Согласованный MVP scope
 
-### Результат
-Есть понятная структура проекта и документы, по которым можно вести дальнейшую работу.
+- Instrument: только `BTCUSDT` на Bybit Perpetuals.
+- Режим: только historical backtest; никаких live orders, private API keys, WebSocket или realtime scanner.
+- Strategy: одна `False Breakout` strategy.
+- Success: `/backtest BTCUSDT <period>` возвращает результаты потенциальных setup, причины принятия/отказа, смоделированные trades и итоговую statistics.
 
-## Этап 2. Доменная модель и данные
-**Цель:** описать, какие данные нужны для backtest и как они хранятся.
+## Зафиксированные policy решения
 
-### Что должно быть сделано
-- определить сущности: candles, backtest runs, trades, results
-- описать схему PostgreSQL
-- определить ключи, индексы и связи между сущностями
-- описать, какие данные берутся из Bybit public API
+- D1 SMA(200) trend — обязательный eligibility gate для signal.
+- SpeedRatio — configurable MVP filter на H1; он не переносит realtime scanner или его side effects.
 
-### Результат
-Есть минимальная data model, по которой можно реализовывать загрузку и хранение данных.
+## Открытые policy решения
 
-## Этап 3. Backtest engine
-**Цель:** реализовать логику проверки стратегии на исторических данных.
+До Feature 03/04 нужно зафиксировать rule преобразования SMA(200) в trend state, SpeedRatio delta_price/thresholds/enabled state, timeframe для sweep/ATR, D1 lookback, ATR parameters, close-back window, same-bar policy, stop mode, rounding, execution OHLC policy, fees, slippage, capital и risk_pct.
 
-### Что должно быть сделано
-- определить формат входа для backtest
-- описать false breakout strategy
-- описать правила входа, stop-loss и take-profit
-- описать модель симуляции сделок
-- описать расчёт метрик
+## Порядок поставки
 
-### Результат
-Есть однозначная логика расчёта результата backtest.
+| # | Feature | Статус | Зависимости |
+|---|---|---|---|
+| 01 | Bybit historical market data | Pending | — |
+| 02 | PostgreSQL candle cache | Pending | 01 |
+| 03 | Market context: D1 trend and working levels | Pending policy parameters | 01, 02, policy decisions |
+| 04 | False-breakout signals and planned trade | Pending policy parameters | 03, policy decisions |
+| 05 | Backtest simulation, explainability and statistics | Pending | 02, 04 |
+| 06 | Telegram commands and result delivery | Pending | 05 |
+| 07 | Testing and reproducibility | Pending | 01-06 |
+| 08 | Docker delivery | Pending | 01-07 |
 
-## Этап 4. Bybit data layer
-**Цель:** получать исторические свечи только через публичный API Bybit и кэшировать их локально.
+## Feature 01. Bybit historical market data
 
-### Что должно быть сделано
-- описать Bybit client
-- описать загрузку missing candles
-- описать поведение при ограничениях API
-- описать сохранение данных в PostgreSQL
+**Product requirement:** получать historical candles через public API Bybit.
 
-### Результат
-Есть надёжный слой данных без лишних запросов к API.
+Deliverable: `features/01-bybit-historical-data.md`.
 
-## Этап 5. Telegram bot
-**Цель:** дать пользователю команды и вернуть результат backtest в Telegram.
+Exit criteria:
+- [ ] Client получает closed BTCUSDT perpetual candles за указанный range.
+- [ ] Пагинация, rate limit и ошибки API обработаны явно.
+- [ ] Candles нормализованы в UTC и отсортированы от старых к новым.
 
-### Что должно быть сделано
-- описать команды `/backtest`, `/strategy`, `/status`, `/help`
-- описать формат ответа
-- описать обработку ошибок
-- описать сценарий запуска и ответа в чате
+## Feature 02. PostgreSQL candle cache
 
-### Результат
-Пользователь может управлять MVP через Telegram.
+**Product requirements:** кэшировать candles в PostgreSQL; запрашивать только missing data.
 
-## Этап 6. Тестирование
-**Цель:** убедиться, что каждый слой работает корректно.
+Deliverable: `features/02-postgresql-candle-cache.md`.
 
-### Что должно быть сделано
-- unit tests для парсинга и расчётов
-- unit tests для стратегии
-- integration tests для Bybit client и repository
-- smoke test для полного сценария backtest
+Exit criteria:
+- [ ] Candle уникальна по symbol, timeframe и timestamp.
+- [ ] Repository возвращает cached range и missing ranges.
+- [ ] Повторный запрос уже сохранённого range не вызывает Bybit API.
 
-### Результат
-Есть понятный набор проверок для разработки и регрессии.
+## Feature 03. Market context: D1 trend and working levels
 
-## Этап 7. Сборка и запуск
-**Цель:** подготовить воспроизводимый запуск в Docker Compose.
+**Detailed MVP requirements:** D1 SMA(200) trend; unbroken extrema N previous D1 candles; configurable internal days.
 
-### Что должно быть сделано
-- описать конфигурацию окружения
-- подготовить Dockerfile
-- подготовить docker-compose.yml
-- описать локальный запуск
+Deliverable: `features/03-market-context-and-levels.md`.
 
-### Результат
-Проект можно поднять локально одинаково у всех участников.
+Exit criteria:
+- [ ] D1 SMA(200) eligibility gate применён по зафиксированному state rule.
+- [ ] По closed D1 candles строятся воспроизводимые PDL/PDH snapshots.
+- [ ] Invalidation levels и policy внутреннего дня покрыты tests.
 
-## Текущий статус
-- [x] Этап 1. Основа проекта
-- [ ] Этап 2. Доменная модель и данные
-- [ ] Этап 3. Backtest engine
-- [ ] Этап 4. Bybit data layer
-- [ ] Этап 5. Telegram bot
-- [ ] Этап 6. Тестирование
-- [ ] Этап 7. Сборка и запуск
+## Feature 04. False-breakout signals and planned trade
+
+**Product requirements:** одна False Breakout strategy; entry, stop-loss и take-profit для каждого signal.
+
+Deliverable: `features/04-false-breakout-signals.md`.
+
+Exit criteria:
+- [ ] Penetration -> close-back вычисляется без look-ahead bias.
+- [ ] Depth filter, configurable SpeedRatio filter и close-back window применяются по зафиксированной policy.
+- [ ] Каждый accepted signal содержит direction, level, evidence, entry, SL, TP и risk_per_unit.
+- [ ] Каждый rejected candidate содержит код причины.
+
+## Feature 05. Backtest simulation, explainability and statistics
+
+**Product requirements:** моделировать trade result по следующим candles; вернуть базовую statistics.
+
+Deliverable: `features/05-backtest-simulation-and-statistics.md`.
+
+Exit criteria:
+- [ ] Engine моделирует entry, SL, TP и outcome без вызовов Bot/Bybit.
+- [ ] Для каждого candidate доступна evidence trail: accepted/rejected и причина.
+- [ ] Рассчитаны восемь метрик из PRODUCT.md.
+- [ ] Одинаковые data и parameters дают одинаковый result.
+
+## Feature 06. Telegram commands and result delivery
+
+**Product requirements:** `/backtest`, `/strategy`, `/status`, `/help`; statistics в Telegram.
+
+Deliverable: `features/06-telegram-commands-and-report.md`.
+
+Exit criteria:
+- [ ] `/backtest BTCUSDT <period>` запускает полный flow и возвращает report.
+- [ ] `/strategy`, `/status` и `/help` отвечают по назначению.
+- [ ] Report показывает results, reasons и итоговую statistics.
+
+## Cross-cutting delivery
+
+### Feature 07. Testing and reproducibility
+
+- Unit tests: client normalization, cache ranges, levels, signals, fills, statistics.
+- Integration tests: Bybit client, PostgreSQL repositories, full backtest flow.
+- Smoke test: `/backtest BTCUSDT <period>`.
+
+### Feature 08. Docker delivery
+
+- Dockerfile и docker-compose для app + PostgreSQL.
+- Документированный local start.
+
+## Не входит в MVP
+
+Другие symbols/strategies, manual H4 levels, H4 trend, volume delta, live trading, private API keys, realtime scanning, multiple open positions, extended money management, charts, Web UI, ML, Redis и Kubernetes.
