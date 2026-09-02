@@ -1,39 +1,46 @@
 # Feature 04: False-breakout signals and planned trade
 
-## Product source
+## Источник продуктовых требований
 
 `PRODUCT.md`: одна False Breakout strategy; entry, stop-loss и take-profit для каждого signal.
 
 `mvp_false_breakout_btcusdt.md`: depth filter, close-back window, entry offset, sweep-extreme stop и RR.
 
-## Decision gate
+## Зафиксированные решения
 
-До реализации нужно зафиксировать intraday/ATR timeframe, ATR parameters, close-back window, same-bar policy, multi-penetration policy, SpeedRatio delta_price/thresholds/enabled state, stop mode, tick rounding и RR.
+- D1 используется для trend/levels, H1 ATR(14) для depth и SpeedRatio, M5 для penetration/close-back.
+- Границы depth равны `0.1..0.35` включительно.
+- Окно close-back равно двум M5 candles.
+- Отступ entry равен 2 ticks, stop использует sweep extreme, `RR=3`.
+- `risk_pct=1` и максимум одна position принадлежат engine, а не strategy.
 
-## Goal
+Не разрешены: SpeedRatio delta origin/threshold/default-enabled state, same-bar confirmation, multi-penetration selection, источник `tick_size`, точная ATR warm-up/calculation semantics и price rounding вне двухтикового offset.
+
+## Цель
 
 Преобразовать frozen levels и closed intraday candles в explainable planned signals.
 
 ## Scope
 
-- Causal penetration -> close-back detection.
-- ATR-normalized depth filter.
+- Причинное M5 detection `penetration -> close-back` в окне двух candles.
+- H1 ATR(14)-normalized inclusive depth filter `0.1..0.35`.
 - Configurable H1 SpeedRatio filter: `SpeedRatio = delta_price / ATR_H1`.
-- Planned entry, SL, TP, `risk_per_unit`.
-- Accepted/rejected candidate evidence и reason code.
+- Planned entry, SL, TP и `risk_per_unit`.
+- Evidence accepted/rejected candidate, reason code, parameter snapshot и strategy version context.
 
-## Exclusions
+## Исключения
 
 Fills, quantity, portfolio state, fees, slippage, live orders и future-data access.
 
-## Acceptance criteria
+## Критерии приёмки
 
-- [ ] Strict penetration and close-back rules work for LONG and SHORT.
-- [ ] Invalid candidate exposes a specific reason code.
-- [ ] Accepted signal contains level, timestamps, depth, entry, SL, TP and RR.
-- [ ] No signal depends on a future candle.
+- [ ] Строгие правила penetration и close-back работают для LONG и SHORT.
+- [ ] Invalid candidate содержит конкретный reason code.
+- [ ] Accepted signal содержит level, timestamps, depth, entry, SL, TP и RR.
+- [ ] Entry offset 2 ticks, sweep-extreme SL и `RR=3` совпадают с contract.
+- [ ] Ни один signal не зависит от future candle.
 
-## Tests
+## Тесты
 
-- Unit tests for LONG/SHORT detection, invalidation and calculations.
-- Regression tests for look-ahead and same-bar policy.
+- Unit tests проверяют LONG/SHORT detection, invalidation и calculations.
+- Regression tests проверяют look-ahead и same-bar policy.

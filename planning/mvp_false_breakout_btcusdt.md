@@ -1,5 +1,7 @@
 # Стратегия ложных пробоев
 
+> **Статус разделов до `# MVP`: историческое видение.** Они сохранены как исходный продуктовый контекст и не являются authoritative для текущего MVP. При любом конфликте действуют раздел `# MVP`, `PRODUCT.md`, `STRATEGY_SPEC.md` и `ARCHITECTURE.md`.
+
 Написать бот для торговли ложных пробоев на рынке бессрочных фьючерсов крипто биржи Bybit.
 
 ## 1) Цель и общая идея
@@ -233,6 +235,16 @@ BTCUSDT
 
 MVP предназначен только для проверки того, что правила стратегии можно однозначно воспроизвести на исторических данных и получить понятный результат.
 
+Пользовательский contract запуска:
+
+```text
+/backtest BTCUSDT <period>
+```
+
+Пример: `/backtest BTCUSDT 90d`. Symbol `BTCUSDT` фиксирован, period является единственным изменяемым аргументом после symbol, а timeframe пользователем не передаётся.
+
+Внутренние timeframes: D1 для trend и levels, H1 для ATR(14) и SpeedRatio, M5 для penetration, close-back и execution.
+
 ## В MVP входит
 
 ### 1. Торговый инструмент
@@ -274,6 +286,8 @@ SMA(200)
 - при LONG рассматриваются ложные пробои минимумов;
 - при SHORT рассматриваются ложные пробои максимумов.
 
+State определяется по последней закрытой D1 candle: `close > SMA(200)` даёт LONG, `close < SMA(200)` даёт SHORT, equality даёт no-trade.
+
 ### 4. Рабочие дневные уровни
 
 Рабочие уровни определяются по экстремумам предыдущих N дневных свечей.
@@ -298,10 +312,10 @@ SMA(200)
 
 Используется минимальная и максимальная допустимая глубина прокола.
 
-Базовый диапазон:
+Зафиксированный диапазон, обе границы включительны:
 
 ```text
-0.1 – 0.35 ATR H1(14)
+0.1 <= depth_atr <= 0.35, ATR H1(14)
 ```
 
 Если глубина прокола меньше минимальной или больше максимальной, сигнал отклоняется.
@@ -316,7 +330,7 @@ SMA(200)
 SpeedRatio = ΔPrice / ATR
 ```
 
-где ATR рассчитывается на H1.
+где используется ATR(14) на H1.
 
 Фильтр должен позволять отличать медленный подход от быстрого импульсного движения.
 
@@ -324,7 +338,7 @@ SpeedRatio = ΔPrice / ATR
 
 После пробоя цена должна вернуться обратно за рабочий уровень в течение ограниченного времени.
 
-Базовое значение:
+Зафиксированное окно:
 
 ```text
 2 свечи M5
@@ -336,7 +350,7 @@ SpeedRatio = ΔPrice / ATR
 
 После подтверждённого возврата рассчитывается цена входа.
 
-Базовый отступ:
+Зафиксированный отступ:
 
 ```text
 2 тика от рабочего уровня
@@ -352,7 +366,7 @@ Stop Loss рассчитывается за фактический экстре�
 
 Take Profit рассчитывается по фиксированному Risk/Reward.
 
-Базовое значение:
+Зафиксированное значение:
 
 ```text
 RR = 3
@@ -360,7 +374,7 @@ RR = 3
 
 ### 12. Историческая проверка
 
-Пользователь должен иметь возможность запустить анализ BTCUSDT за последние N дней.
+Пользователь запускает анализ BTCUSDT за выбранный period командой `/backtest BTCUSDT <period>`, например `/backtest BTCUSDT 90d`.
 
 Для каждого найденного ложного пробоя необходимо показать:
 
@@ -410,6 +424,34 @@ RR = 3
 - почему сетап перестал быть актуальным;
 - чем завершилась смоделированная сделка.
 
+Для каждого rejected candidate сохраняются reason code, evidence, полный parameter snapshot и strategy version. Application оркестрирует persistence этих данных, accepted candidates, trades и итогового result через repository и transaction ports. PostgreSQL adapter реализует storage.
+
+Run сохраняет resolved UTC `start`, `end`, `as_of` и immutable association с точным использованным candle set через candle IDs и content/version hash. Использованные candle versions остаются immutable; correction создаёт новую version. Поэтому run можно воспроизвести, даже если candle cache позднее исправлен.
+
+### 16. Backtest Engine
+
+`risk_pct=1`, расчёт quantity и ограничение не более одной одновременно открытой position принадлежат engine, а не strategy. Engine является pure и не выполняет I/O или persistence orchestration.
+
+Если SL и TP затронуты в одной M5 execution candle, применяется pessimistic policy: результатом считается SL.
+
+### 17. Concurrency
+
+Во всём приложении одновременно выполняется только один backtest. Если active run уже существует, новый request немедленно получает busy response и не ставится в queue. Async Telegram handler не выполняет CPU simulation напрямую.
+
+### 18. Неразрешённые параметры
+
+Явно не определены:
+
+- level lookback N, inside-day policy, количество active levels и rearm;
+- SpeedRatio delta origin, threshold и default-enabled state;
+- same-bar confirmation и multi-penetration selection;
+- execution ordering: первая fill-eligible candle, возможность fill entry на confirmation candle, порядок entry и exit в одной OHLC candle;
+- candidate lifecycle: момент создания, multiplicity для одного level, условия termination и precedence между reason codes;
+- risk sizing при подтверждённом `risk_pct=1`: initial или current equity как base, интерпретация percentage и sizing formula;
+- gap policy, initial capital, fees, slippage и quantity rounding;
+- источник `tick_size`, точная ATR warm-up/calculation semantics и price rounding вне entry offset в два ticks;
+- metric semantics: Profit Factor при отсутствии losing trades, result при zero trades, basis для maximum drawdown, denominator для average R:R и units для final result.
+
 ---
 
 # Что не входит в MVP
@@ -441,7 +483,7 @@ RR = 3
 
 # Критерий успеха MVP
 
-MVP считается успешным, если пользователь может запустить исторический анализ стратегии False Breakout для `BTCUSDT` за выбранный период и получить:
+MVP считается успешным, если пользователь может отправить `/backtest BTCUSDT 90d`, запустить исторический анализ стратегии False Breakout и получить:
 
 1. найденные потенциальные ложные пробои;
 2. результат применения фильтров;

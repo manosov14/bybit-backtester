@@ -11,11 +11,14 @@ This repository is a minimal MVP for a Telegram-based Bybit backtester.
 - Do not add Web UI, WebSocket, Redis, Kubernetes, ML, or multi-strategy support unless the user explicitly requests it.
 - Use Python, PostgreSQL, Docker, Docker Compose, Telegram Bot API, and `python-telegram-bot` as the default stack.
 - The system must use real public Bybit market data and must not require trading API keys.
-- При любых изменениях обязательно обновляй документацию в `docs/`.
-- If a change touches architecture, update `ARCHITECTURE.md` and `PRODUCT.md` when needed.
-- If a change affects user-facing behavior or scope, update `PRODUCT.md` first, then code.
+- Every code, configuration, or documentation change must update all affected technical documentation in both `docs/` and `planning/`.
+- При любом изменении кода, конфигурации или документации обязательно обновляй всю затронутую техническую документацию одновременно в `docs/` и `planning/`.
+- If a change affects user-facing behavior or scope, update `planning/PRODUCT.md` first, then update the implementation and every other affected document.
+- Если изменение влияет на пользовательское поведение или scope, сначала обнови `planning/PRODUCT.md`, затем реализацию и все остальные затронутые документы.
+- If a change touches architecture, update `planning/ARCHITECTURE.md` and every other affected document.
+- Если изменение затрагивает архитектуру, обнови `planning/ARCHITECTURE.md` и все остальные затронутые документы.
 - В папке `planning/` все документы и дальнейшие правки веди на русском языке.
 
 ## MVP behavior
 - The bot should support `/backtest`, `/strategy`, `/status`, and `/help`.
-- `/backtest` should fetch missing historical candles, store them locally, run one strategy, simulate trades, and return statistics in Telegram.
+- `/backtest BTCUSDT <period>` should accept only the fixed MVP symbol and a period, fetch missing D1/H1/M5 candles, store them locally, run one strategy, simulate trades, and return statistics in Telegram.

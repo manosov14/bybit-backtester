@@ -1,143 +1,182 @@
 # Спецификация стратегии false breakout
 
-Документ задаёт domain-контракт единственной стратегии MVP до начала реализации. Источником служит `bybit_trade` на зафиксированном commit `152eadffe4abf6948c23b87776cca0d82c539df7` и результаты исполнения его чистых функций. В каталоге `strategies/` на этом commit нет исполняемой стратегии: `base.py` задаёт protocol, а `empty.py` возвращает пустой список signals ([`strategies/base.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/strategies/base.py), [`strategies/empty.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/strategies/empty.py)). Поэтому документ не является буквальным переносом одного strategy-файла.
+Документ задаёт domain-контракт единственной стратегии MVP. Strategy работает только с `BTCUSDT` и закрытыми candles. Она детерминированно формирует accepted signals и rejected candidates, но не управляет capital, positions или исполнением сделок.
 
-`domain.sweep.check_sweep` является лучшим семантическим ориентиром для false breakout ([`domain/sweep.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47)), но копировать его буквально нельзя. Исполненная проверка выявила обратный временной порядок: функция ищет close-back в окне, включающем бары до penetration. Ниже причинный порядок исправлен как явный specification choice: penetration должен предшествовать допустимому close-back. Может ли один OHLC bar подтвердить обе фазы, остаётся отдельным решением из раздела 10. Активный scanner фиксирует только пересечение уровня и не требует close-back, поэтому он не является семантическим источником false breakout ([`scanner/sweep_detector.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/scanner/sweep_detector.py#L21-L97)).
+## 1. Внутренние timeframes
 
-## 1. Обязательные входные данные
+- D1: trend state и working PDL/PDH levels.
+- H1: ATR(14) для depth filter и SpeedRatio.
+- M5: penetration, close-back и execution candles.
 
-Стратегия получает:
+Пользователь не выбирает timeframe в команде. Период запуска задаётся через `/backtest BTCUSDT <period>`, например `/backtest BTCUSDT 90d`.
 
-- `symbol` и направление `LONG` или `SHORT`;
-- D1 candles в хронологическом порядке, от старых к новым, с полями `timestamp`, `open`, `high`, `low`, `close`; используются только закрытые candles;
-- закрытые intraday candles для поиска penetration и close-back с теми же OHLC-полями, также в хронологическом порядке;
-- закрытые H1 candles или эквивалентную ATR series для SpeedRatio filter;
-- D1 SMA(200) trend state, детерминированно рассчитанный только по закрытым D1 candles;
-- конечный `tick_size > 0`, целый `entry_ticks >= 0`, параметры выбранного stop mode и конечный `RR > 0`;
-- ATR series либо данные и параметры её детерминированного расчёта, а также конечные границы `0 <= min_depth_atr <= max_depth_atr`;
-- `equity` и `risk_pct` не являются входами strategy; их получает backtest engine для расчёта размера позиции.
+## 2. D1 trend state
 
-Набор OHLC-полей следует контрактам reference-функций ([`domain/levels.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L19-L30), [`domain/sweep.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L31)). Хронологический порядок является обязательным specification choice: reference-код полагается на позиционный порядок, но не проверяет его. Требование использовать только закрытые бары также является исправленным specification choice: reference-код не проверяет, что intraday candle уже закрыта, а level builder позиционно считает последнюю D1 строку открытой. `tick_size` передаётся как готовый domain-вход. Стратегия не загружает exchange metadata и не обращается к CCXT.
+Trend state рассчитывается только по последней закрытой D1 candle и SMA(200), рассчитанной только по закрытым D1 candles:
 
-## 2. Правила генерации signal
+- если `close > SMA(200)`, state равен `LONG`;
+- если `close < SMA(200)`, state равен `SHORT`;
+- если `close == SMA(200)`, действует no-trade state.
 
-1. В начале каждого UTC day `D` строится и фиксируется daily snapshot уровней из D1 candles, период которых завершился не позднее начала `D`. Candle `D-1`, закрывшаяся на границе начала `D`, включается в snapshot. Для `LONG` кандидат равен PDL, то есть `low` закрытого D1 bar. Для `SHORT` кандидат равен PDH, то есть `high` закрытого D1 bar.
-2. Более позднее закрытое D1 касание, уже доступное при построении snapshot, включительно отменяет кандидат: для PDL достаточно `later.low <= PDL`, для PDH достаточно `later.high >= PDH`.
-3. Открытая D1 candle не участвует ни как кандидат, ни как источник invalidation. Если input содержит только закрытые D1 bars, последняя строка является допустимым кандидатом. Это осознанное уточнение reference-алгоритма: он всегда исключает последнюю строку, потому что неявно считает её текущей открытой candle ([`domain/levels.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L52-L71)). Snapshot не меняется intraday и тем самым не удаляет уровень задним числом после sweep.
-4. Неверное направление не получает fallback. Допустимы только `LONG` и `SHORT`; reference-поведение, где любое значение кроме `LONG` выбирает PDH, не принимается.
-5. Для каждого рабочего уровня false breakout определяется причинной последовательностью `penetration -> close-back`. Close-back ищется начиная со следующего закрытого bar либо с penetration bar, если отдельно разрешена same-bar policy. Проверка идёт слева направо и видит только закрытые бары не позднее текущего шага. Future data запрещены.
-6. `LONG penetration`: `low < level`. `SHORT penetration`: `high > level`. Равенство не считается penetration.
-7. `LONG close-back`: `close > level`. `SHORT close-back`: `close < level`. Равенство не подтверждает возврат.
-8. `depth_abs = level - penetration_low` для `LONG`, `depth_abs = penetration_high - level` для `SHORT`; `depth_atr = depth_abs / ATR`. Обе заданные границы ATR включительны. ATR должен быть конечным и строго положительным.
-9. D1 SMA(200) trend является обязательным eligibility gate: LONG candidates рассматриваются только при состоянии D1 `LONG`, SHORT candidates — только при состоянии D1 `SHORT`. H4 trend в MVP не используется. Правило преобразования SMA(200) в `LONG`/`SHORT`/no-trade state должно быть отдельно зафиксировано до реализации.
-10. SpeedRatio является configurable filter MVP. Он рассчитывается на H1: `SpeedRatio = delta_price / ATR_H1`. Кандидат должен содержать рассчитанное значение и результат фильтра; rule выбора начала `delta_price`, ATR parameters, threshold и enabled/disabled state остаются policy parameters.
+LONG candidates рассматриваются только в `LONG` state. SHORT candidates рассматриваются только в `SHORT` state. H4 trend в MVP не используется.
 
-Семантика PDL, PDH и inclusive invalidation подтверждена [`working_levels_d1`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L32-L72). Closed-only snapshot устраняет неявную позиционную модель открытой последней строки в reference-коде. Строгие inequalities и inclusive ATR bounds взяты из [`check_sweep`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47). Причинный порядок является исправленным specification choice по доказанному temporal defect этой функции. Необязательность bias подтверждается тем, что D1 gating находится во внешнем scanner filter, а не в sweep primitive ([`scanner/filter_adapter.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/scanner/filter_adapter.py#L24-L56)).
+## 3. Working levels
 
-## 3. LONG setup
+В начале каждого UTC day строится frozen snapshot рабочих D1 levels из данных, закрытых не позднее начала этого дня.
 
-LONG setup существует, когда выполнены все условия:
+- Для LONG используется PDL, то есть `low` закрытой D1 candle.
+- Для SHORT используется PDH, то есть `high` закрытой D1 candle.
+- Более позднее доступное D1 касание включительно отменяет level: `low <= PDL` или `high >= PDH`.
+- Открытая D1 candle не участвует в выборе или invalidation.
+- Snapshot не меняется intraday и не удаляет level задним числом после sweep.
 
-1. Есть действующий PDL, построенный по правилам раздела 2.
-2. Закрытый intraday bar строго проникает ниже PDL: `penetration_low < level`.
-3. Глубина penetration попадает в обе включительные ATR-границы.
-4. На допустимом по same-bar policy закрытом bar происходит строгий close-back: `close > level`. Допустимость same-bar подтверждения остаётся открытым решением из раздела 10.
-5. До момента подтверждения не возникло ни одного условия invalidation из раздела 8.
+Level lookback N, inside-day policy, количество одновременно active levels и rearm policy пока не определены.
 
-Signal фиксирует как минимум `symbol`, `direction=LONG`, identity и цену PDL, время penetration, время confirmation, sweep extreme, `depth_abs`, `depth_atr`, planned entry, planned SL, planned TP, `risk_per_unit` и planned `RR`. Направление и условия penetration/close-back опираются на [`working_levels_d1`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L52-L72) и [`check_sweep`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47); временной порядок исправлен спецификацией.
+## 4. M5 false breakout
 
-## 4. SHORT setup
+False breakout задаётся причинной последовательностью `penetration -> close-back` на закрытых M5 candles без future data.
 
-SHORT setup существует, когда выполнены все условия:
+- LONG penetration: `low < level`.
+- SHORT penetration: `high > level`.
+- LONG close-back: `close > level`.
+- SHORT close-back: `close < level`.
+- Равенство не считается penetration или close-back.
+- Close-back должен произойти в окне двух M5 candles.
 
-1. Есть действующий PDH, построенный по правилам раздела 2.
-2. Закрытый intraday bar строго проникает выше PDH: `penetration_high > level`.
-3. Глубина penetration попадает в обе включительные ATR-границы.
-4. На допустимом по same-bar policy закрытом bar происходит строгий close-back: `close < level`. Допустимость same-bar подтверждения остаётся открытым решением из раздела 10.
-5. До момента подтверждения не возникло ни одного условия invalidation из раздела 8.
+Допустимость confirmation на той же M5 candle, выбор при нескольких penetration и точная трактовка границ двухсвечного окна относительно same-bar policy пока не определены.
 
-Signal фиксирует тот же набор полей, что LONG setup, с `direction=SHORT` и PDH. Направление и условия penetration/close-back опираются на [`working_levels_d1`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L52-L72) и [`check_sweep`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47); временной порядок исправлен спецификацией.
+## 5. H1 ATR и depth filter
 
-## 5. Расчёт entry
-
-Planned entry задаётся относительно уровня:
+Для нормализации глубины используется ATR(14) на H1:
 
 ```text
-entry_LONG  = level + entry_ticks * tick_size
-entry_SHORT = level - entry_ticks * tick_size
-risk_per_unit = abs(entry - stop)
-risk_amount = equity * risk_pct / 100
-quantity_raw = risk_amount / risk_per_unit
+depth_abs_LONG = level - penetration_low
+depth_abs_SHORT = penetration_high - level
+depth_atr = depth_abs / ATR_H1(14)
 ```
 
-Первые две формулы подтверждены reference order plan ([`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L414-L455)). Формулы риска и количества подтверждены чистым domain-кодом ([`domain/risk.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26)). `risk_per_unit == 0` отменяет setup и запрещает деление. Подстановка одного tick вместо нулевой дистанции из operational path не принимается.
+Допустимый диапазон `depth_atr` равен `0.1 <= depth_atr <= 0.35`. Обе границы включительны. ATR должен быть конечным и строго положительным.
 
-Strategy может рассчитать planned entry и `risk_per_unit`, но не исполняет вход. `risk_amount` и `quantity_raw` приведены как обязательные формулы общего контракта; их применение, quantity rounding, проверка доступного capital и portfolio state принадлежат backtest engine.
+Точная семантика ATR warm-up и расчёта пока не определена.
 
-## 6. Расчёт stop-loss
+## 6. SpeedRatio
 
-Source содержит три несовместимых stop variants. До выбора stop mode реализация стратегии не считается полностью определённой:
-
-- **Sweep-extreme mode:** `stop_LONG = sweep_low`, `stop_SHORT = sweep_high`.
-- **Fixed-tick mode:** `stop_LONG = level - stop_ticks * tick_size`, `stop_SHORT = level + stop_ticks * tick_size`.
-- **Spike mode:** `stop_LONG = min(penetration_bar.low, previous_bar.low)`, `stop_SHORT = max(penetration_bar.high, previous_bar.high)`.
-
-Sweep-extreme и fixed-tick варианты реализованы в [`OrderManager.make_plan`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L414-L455). Spike variant встречается в legacy backtest ([`usecases/backtest_days.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/backtest_days.py#L89-L107)). Спецификация сохраняет конфликт и не назначает default. После выбора mode обязательна направленная проверка: `stop < entry` для `LONG`, `stop > entry` для `SHORT`.
-
-## 7. Расчёт take-profit
-
-Take-profit симметрично отстоит от entry на выбранный reward-to-risk multiple:
+SpeedRatio является configurable filter MVP и рассчитывается на H1:
 
 ```text
-TP_LONG  = entry + RR * (entry - stop)
-TP_SHORT = entry - RR * (stop - entry)
+SpeedRatio = delta_price / ATR_H1(14)
 ```
 
-Формулы предполагают прошедшую направленную проверку stop из раздела 6 и совпадают с чистой реализацией [`position_sizing`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26) и operational plan ([`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L414-L455)). Числовое значение `RR` не задаётся этим документом. Strategy рассчитывает planned TP, а engine решает, был ли он фактически достигнут.
+Каждый candidate сохраняет рассчитанное значение и результат фильтра. Начало `delta_price`, threshold и default-enabled state пока не определены.
 
-## 8. Условия invalidation
+## 7. Planned entry, stop-loss и take-profit
 
-Кандидат уровня, незавершённый setup или готовый signal отклоняется, если применимо хотя бы одно условие:
+Entry задаётся на расстоянии двух ticks от рабочего level:
 
-- при построении следующего daily snapshot D1 candidate получил более позднее закрытое D1 inclusive touch: `low <= PDL` либо `high >= PDH`; intraday snapshot остаётся frozen, чтобы сам sweep не удалял уровень задним числом;
-- входные candles идут не в хронологическом порядке, содержат незакрытый bar в core detection или требуют future data для подтверждения;
-- penetration отсутствует, касается уровня только равенством или не получает допустимый close-back в выбранном временном окне;
-- ATR отсутствует, не является конечным положительным числом либо `depth_atr` выходит за включительные границы;
-- направление не равно `LONG` или `SHORT`;
-- stop находится с неверной стороны entry;
-- `risk_per_unit = abs(entry - stop)` равен нулю.
+```text
+entry_LONG = level + 2 * tick_size
+entry_SHORT = level - 2 * tick_size
+```
 
-Inclusive invalidation уровня следует [`_later_bars_breaks`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L32-L44). Строгие penetration и close-back, а также ATR bounds следуют [`check_sweep`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47). Явная отмена при невалидном ATR и неверном направлении является corrected specification choice: `check_sweep` использует небезопасный ATR fallback ([`domain/sweep.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L35-L40)), а `working_levels_d1` трактует любое направление, кроме `LONG`, как `SHORT` ([`domain/levels.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L52-L58)). Отмена при open/future bars является отдельным требованием причинности. Нулевая дистанция отменяет setup вместо разных source-поведений в [`position_sizing`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26) и [`OrderManager.make_plan`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L451-L455).
+Stop-loss всегда использует фактический sweep extreme:
 
-## 9. Зависимости от существующей domain-логики bybit_trade
+```text
+stop_LONG = sweep_low
+stop_SHORT = sweep_high
+```
 
-Нужно переиспользовать на уровне семантики, с новой чистой реализацией:
+Take-profit использует фиксированный `RR=3`:
 
-- выбор unbroken D1 PDL/PDH и inclusive invalidation из [`domain/levels.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L32-L72);
-- строгие penetration, close-back и ATR-normalized depth из [`domain/sweep.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47), но только с исправленным причинным порядком;
-- entry, sweep-extreme и fixed-tick stop variants, symmetric RR TP и linear risk formulas из [`domain/risk.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26) и [`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L414-L455); spike variant отдельно происходит из [`usecases/backtest_days.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/backtest_days.py#L89-L107);
-- границу pure strategy output без exchange side effects, отражённую в [`SignalIntent`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/strategies/base.py#L25-L42).
+```text
+TP_LONG = entry + 3 * (entry - stop)
+TP_SHORT = entry - 3 * (stop - entry)
+```
 
-Strategy отвечает за детерминированное signal generation и может вернуть planned entry, SL, TP, `risk_per_unit`, timestamps и доказательства setup. Backtest engine отвечает за fills, price и quantity rounding, portfolio state, capital/risk application, position overlap, trade outcomes, fees, slippage и statistics. Это сохраняет отделение strategy от симуляции, уже заложенное в текущей архитектуре MVP.
+Strategy отклоняет candidate, если stop находится не с той стороны entry или `risk_per_unit = abs(entry - stop)` равен нулю. Источник `tick_size` и любое price rounding, не заданное двухтиковым offset, пока не определены.
 
-Не входят в перенос и не являются зависимостями стратегии: real order execution, authentication, live runtime, scanner-only functionality, unrelated CLI, exchange metadata, CCXT, scanner state, sessions, delta filter, order placement и audit logging. D1 SMA(200) trend gate и configurable H1 SpeedRatio входят в MVP как explicit policy, но не переносят scanner pipeline или его side effects. В приведённых диапазонах `OrderManager` смешивает exchange initialization, metadata, rounding и planning ([`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L370-L462)), а scanner pipeline смешивает depth, session и speed filters ([`scanner/filter_adapter.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/scanner/filter_adapter.py#L59-L150)). Эти components не нужны чистому backtest domain.
+## 8. Граница Strategy и Backtest Engine
 
-## 10. Неразрешённые неоднозначности
+Strategy отвечает за levels, filters, signal evidence и planned entry, SL, TP, `risk_per_unit`. Backtest engine отвечает за:
 
-До реализации владелец стратегии должен отдельно выбрать и зафиксировать следующие policy. Этот документ намеренно не подставляет source defaults:
+- `risk_pct=1` и расчёт quantity;
+- не более одной одновременно открытой позиции;
+- fills, portfolio state и trade outcomes;
+- fees, slippage и rounding;
+- pessimistic execution: если SL и TP затронуты в одной M5 execution candle, результатом считается SL;
+- statistics.
 
-- timeframe для sweep candles и timeframe для ATR;
-- правило преобразования D1 SMA(200) в states `LONG`, `SHORT` или no-trade;
-- D1 lookback и правило выбора количества одновременно рабочих PDL/PDH;
-- ATR length, минимальную и максимальную `depth_atr`, допустимое окно close-back и все числовые defaults;
-- правило определения `delta_price`, H1 ATR parameters, thresholds и enabled/disabled state для SpeedRatio filter;
-- допустим ли same-bar close-back; OHLC одного bar не доказывает, что penetration случился раньше close;
-- если до close-back есть несколько penetration bars, какой из них задаёт penetration timestamp, sweep extreme, `depth_abs` и используемое значение ATR;
-- один stop mode из sweep-extreme, fixed-tick и spike variants;
-- правила price/tick rounding;
-- может ли уровень rearm после invalidation или уже обработанного sweep;
-- position overlap и execution OHLC policy, включая порядок SL/TP при касании обоих уровней в одном bar и обработку gaps;
-- fees, slippage, initial capital и `risk_pct` defaults;
-- источник `tick_size` для исторического запуска и quantity rounding policy engine.
+Engine является pure domain component и не выполняет I/O. Initial capital, equity base, percentage interpretation, sizing formula, fees, slippage, quantity rounding, execution ordering, metric semantics и gap policy пока не определены.
 
-Эти развилки существуют из-за несовместимых retained paths: pure risk не округляет значения ([`domain/risk.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26)), operational path округляет price и quantity ([`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L399-L455)), а legacy backtest задаёт собственный stop и последовательность SL/TP ([`usecases/backtest_days.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/backtest_days.py#L89-L126)). Ни один из этих вариантов не объявляется default без отдельного решения.
+## 9. Invalidation и reason codes
+
+Candidate отклоняется с конкретным reason code, если применимо хотя бы одно условие:
+
+- отсутствует допустимый trend state или направление ему не соответствует;
+- level недействителен;
+- нет strict penetration;
+- нет close-back в подтверждённом окне;
+- ATR отсутствует, не положителен, не конечен или depth находится вне включительного диапазона;
+- SpeedRatio filter отклоняет candidate;
+- stop находится не с той стороны entry;
+- `risk_per_unit` равен нулю;
+- для решения потребовались незакрытые или будущие candles.
+
+Набор reason codes должен быть стабильным и пригодным для хранения, отчёта и regression tests.
+
+## 10. Persistence и reproducibility
+
+Persistence orchestration принадлежит Application, которое работает через repository и transaction ports. PostgreSQL adapter реализует storage. Strategy и Engine остаются pure и не выполняют I/O. Для каждого run сохраняются:
+
+- полный parameter snapshot, включая engine и strategy parameters;
+- strategy version;
+- resolved UTC `start`, `end` и `as_of`;
+- immutable association с точным candle set через candle IDs и content/version hash; использованная candle version сохраняется, а correction создаёт новую version;
+- accepted и rejected signal candidates;
+- reason code, evidence, полный parameter snapshot и strategy version для каждого rejected candidate, напрямую или через immutable связь с run snapshot;
+- planned signals, trades и итоговый backtest result.
+
+Одинаковые immutable candle set, resolved UTC boundaries, parameter snapshot и strategy version должны давать одинаковый результат даже после исправления candle cache.
+
+## 11. Application concurrency
+
+Ограничение одного active backtest относится к application layer. Если run уже выполняется, новый запрос получает немедленный busy response и не ставится в очередь.
+
+## 12. Неразрешённые параметры
+
+Следующие параметры остаются явно не определены и не получают неявных defaults:
+
+- level lookback N;
+- inside-day policy;
+- количество одновременно active levels;
+- rearm policy;
+- начало `delta_price`, threshold и default-enabled state для SpeedRatio;
+- same-bar signal confirmation;
+- выбор candidate при нескольких penetration;
+- execution ordering: первая fill-eligible candle, возможность fill entry на confirmation candle, порядок entry и exit в одной OHLC candle;
+- candidate lifecycle: момент создания, multiplicity для одного level, условия termination и precedence между reason codes;
+- risk sizing при подтверждённом `risk_pct=1`: initial или current equity как base, интерпретация percentage и sizing formula;
+- gap policy;
+- initial capital;
+- fees;
+- slippage;
+- quantity rounding;
+- источник `tick_size`;
+- точная семантика ATR warm-up и расчёта;
+- любое price rounding, не заданное двухтиковым entry offset;
+- metric semantics: Profit Factor при отсутствии losing trades, result при zero trades, basis для maximum drawdown, denominator для average R:R и units для final result.
+
+В MVP не входят H4 trend или levels, другие symbols или strategies, live trading, private API keys, WebSocket и real order execution.
+
+## 13. Provenance и reference implementation
+
+Domain-контракт основан на `bybit_trade` commit `152eadffe4abf6948c23b87776cca0d82c539df7`, но не копирует его буквально. Причинный порядок `penetration -> close-back`, closed-only candles и явная обработка invalid states являются исправленными specification choices.
+
+- PDL/PDH и inclusive invalidation: [`domain/levels.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/levels.py#L32-L72).
+- Penetration, close-back и ATR-normalized depth: [`domain/sweep.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/sweep.py#L22-L47).
+- Risk и position sizing formulas: [`domain/risk.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/domain/risk.py#L18-L26).
+- Entry, sweep-extreme/fixed-tick stop variants и operational rounding: [`usecases/order_manager.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/order_manager.py#L399-L455).
+- Legacy spike stop и SL/TP sequence: [`usecases/backtest_days.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/usecases/backtest_days.py#L89-L126).
+- Pure strategy boundary: [`strategies/base.py`](https://github.com/manosov14/bybit_trade/blob/152eadffe4abf6948c23b87776cca0d82c539df7/strategies/base.py#L25-L42).
+
+Reference code не является source of truth для подтверждённых MVP defaults. При расхождении действуют правила этого документа и `PRODUCT.md`.
+Формулы risk sizing и execution sequence из reference code являются только provenance: пока соответствующие policy перечислены как unresolved, они не выбирают MVP semantics.

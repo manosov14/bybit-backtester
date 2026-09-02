@@ -1,37 +1,38 @@
 # Feature 03: Market context and working levels
 
-## Product source
+## Источник продуктовых требований
 
-`mvp_false_breakout_btcusdt.md`: D1 SMA(200) trend и рабочие экстремумы N previous days без снятой liquidity.
+`mvp_false_breakout_btcusdt.md` задаёт D1 SMA(200) trend и рабочие экстремумы N previous days без снятой liquidity.
 
 ## Зафиксированное решение
 
-D1 SMA(200) — обязательный eligibility gate MVP: LONG candidates допустимы только в D1 `LONG` state, SHORT candidates — только в D1 `SHORT` state. H4 trend не входит в MVP. Отдельно требуется зафиксировать правило преобразования SMA(200) в state `LONG`/`SHORT`/no-trade.
+D1 SMA(200) является обязательным eligibility gate MVP. Для последней закрытой D1 candle `close > SMA(200)` даёт `LONG`, `close < SMA(200)` даёт `SHORT`, equality даёт no-trade. H4 trend не входит в MVP.
 
-## Goal
+## Цель
 
 По closed D1 BTCUSDT candles детерминированно определить market context и frozen working PDL/PDH levels.
 
 ## Scope
 
 - D1 SMA(200) trend state как обязательный gate.
-- Configurable D1 lookback N.
+- Настраиваемый D1 lookback N.
 - PDL/PDH candidates из closed D1 candles.
-- Inclusive invalidation: `low <= PDL`, `high >= PDH`.
-- Configurable inclusion of inside days.
+- Включительная invalidation: `low <= PDL`, `high >= PDH`.
+- Настраиваемое участие inside days.
 - Frozen daily snapshots для intraday detection.
 
-## Exclusions
+## Исключения
 
 H4 trend, manual H4 levels, realtime recalculation и strategy execution.
 
-## Acceptance criteria
+## Критерии приёмки
 
-- [ ] Snapshot использует только data, closed до начала UTC day.
+- [ ] Snapshot использует только candles, закрытые до начала UTC day.
 - [ ] Каждый working level сохраняет identity, side и invalidation evidence.
-- [ ] D1 SMA(200) state rule и inside-day policy зафиксированы до implementation.
+- [ ] D1 SMA(200) state rule реализован без look-ahead.
+- [ ] Неопределённые level lookback N, inside-day policy, количество active levels и rearm policy зафиксированы до implementation соответствующей логики.
 
-## Tests
+## Тесты
 
-- Unit tests для SMA trend, level selection, inside days и invalidation.
-- Determinism test: same D1 input gives same snapshot.
+- Unit tests проверяют SMA trend, level selection, inside days и invalidation.
+- Тест на детерминизм подтверждает, что одинаковые D1 input дают одинаковый snapshot.
